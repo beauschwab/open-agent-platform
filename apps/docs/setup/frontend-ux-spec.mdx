@@ -1,0 +1,407 @@
+---
+title: 'Frontend UX Deep Dive'
+description: 'Comprehensive UX specification for Open Agent Platform tab workflows, with detailed design notes for agent and tool management replication.'
+---
+
+## Purpose
+
+This document is a code-level UX specification of the Open Agent Platform frontend (`apps/web`) intended for teams that need to replicate the same interaction model in another framework.
+
+It covers:
+- Every user-facing app tab and primary screen workflow
+- Layout and interaction patterns
+- State ownership (providers/hooks/query params)
+- Loading, empty, and error states
+- A deep design spec for **Agent Management** and **Tool Management**
+
+## Global Application Shell
+
+### Route groups
+
+- **Authenticated app shell**: `apps/web/src/app/(app)`
+  - `/` (Chat)
+  - `/agents`
+  - `/tools`
+  - `/tools/playground`
+  - `/rag`
+  - `/inbox`
+  - `/settings`
+- **Auth shell**: `apps/web/src/app/(auth)`
+  - `/signin`, `/signup`, `/forgot-password`, `/reset-password`
+
+### Layout composition
+
+`apps/web/src/components/sidebar/index.tsx` composes the global runtime stack:
+
+1. `SidebarProvider`
+2. `MCPProvider` (tools)
+3. `AgentsProvider`
+4. `RagProvider`
+5. `AppSidebar` + `SidebarInset`
+
+This gives all app tabs shared access to core entities (agents, tools, RAG collections) while preserving a single navigation shell.
+
+### Primary left navigation
+
+`apps/web/src/components/sidebar/app-sidebar.tsx` defines first-class tabs:
+- Chat (`/`)
+- Agents (`/agents`)
+- Tools (`/tools`)
+- RAG (`/rag`)
+
+`Inbox` and `Settings` are routable but not shown in this primary nav list.
+
+### Consistent page chrome pattern
+
+Most app pages follow this structure:
+- `Toaster`
+- Header row with `SidebarTrigger`
+- Breadcrumb context (page name / hierarchy)
+- Feature container component
+
+This pattern appears in:
+- `app/(app)/page.tsx`
+- `app/(app)/agents/page.tsx`
+- `app/(app)/tools/page.tsx`
+- `app/(app)/tools/playground/page.tsx`
+- `app/(app)/rag/page.tsx`
+- `app/(app)/inbox/page.tsx`
+- `app/(app)/settings/page.tsx`
+
+## Tab-by-tab workflow specification
+
+## 1) Chat (`/`)
+
+### Screen and layout
+
+Entry: `apps/web/src/app/(app)/page.tsx` -> `features/chat/index.tsx`
+
+Main layout is a three-region interaction model:
+- **Center**: thread and message input (`Thread`)
+- **Right-floating controls**: sidebar toggle buttons (`SidebarButtons`)
+- **Slide-out side panels**:
+  - thread history (`ThreadHistorySidebar`)
+  - configuration (`ConfigurationSidebar`)
+
+### Interaction patterns
+
+- `StreamProvider` is the runtime host for conversation state and LangGraph streaming.
+- Click-outside behavior closes side panels except for known portal-based UI elements (dialogs/popovers/listboxes/alerts).
+- Thread supports conversational turns, tool-call rendering, and multimodal previews.
+
+### Shared UX conventions used here
+
+- URL-driven context via `nuqs` (`agentId`, `deploymentId`, `threadId`)
+- Toast feedback for recoverable errors
+- Side-panel progressive disclosure for advanced configuration
+
+## 2) Agents (`/agents`) — Deep design spec
+
+### Entry, structure, and visual model
+
+Entry: `apps/web/src/app/(app)/agents/page.tsx` -> `features/agents/index.tsx`
+
+Top-level structure:
+1. `PageHeader` (title + description)
+2. Two-tab switch using `Tabs`:
+   - **Templates** (`TemplatesList`)
+   - **All Agents** (`AgentDashboard`)
+
+This creates two complementary navigation lenses:
+- **Graph-centric lens** (Templates): grouped by deployment+graph
+- **Agent-centric lens** (All Agents): flat searchable inventory
+
+### Templates tab workflow (`features/agents/components/templates-list/index.tsx`)
+
+#### Layout
+
+- Search bar: "Search by graph or agent name..."
+- Accordion-like card list of deployment+graph groups (`TemplateCard`)
+- Expand/collapse state stored as local array key: `deploymentId:graphId`
+
+#### Behavior
+
+- Groups are built from provider agents using `groupAgentsByGraphs`
+- Filter rule: match either graph id or any child agent name
+- Empty state has a dashed container and guidance copy
+
+#### Notes
+
+- Uses mount-guard (`isMounted`) before rendering content to avoid hydration mismatch
+- Uses loading placeholder (`TemplatesLoading`) while provider data resolves
+
+### All Agents tab workflow (`features/agents/components/agent-dashboard/index.tsx`)
+
+#### Layout
+
+- Search input (`Search agents...`)
+- Graph filter select (`All Templates` + deployment/graph options)
+- Count header (`N Agent(s)`)
+- Responsive card grid (1/2/3 columns depending on viewport)
+
+#### Filter logic
+
+Applied in sequence:
+1. Graph filter (`all` or selected `deploymentId:graphId`)
+2. Name text match (case-insensitive)
+
+#### Empty state
+
+No results panel with icon, help text, and **Create Agent** action.
+
+### Agent card behavior (`features/agents/components/agent-card.tsx`)
+
+Each card communicates:
+- Name
+- Optional deployment + graph badges with tooltips
+- Description (`metadata.description`)
+- Supported config badges:
+  - RAG
+  - MCP Tools
+  - Supervisor
+
+Actions:
+- **Edit** (hidden for user-created default assistants)
+- **Chat** deep link to `/?agentId=...&deploymentId=...`
+
+### Create Agent dialog workflow (`create-agent-dialog.tsx` + `agent-form.tsx`)
+
+#### Step 1: graph targeting
+
+If graph/deployment are not pre-injected, user must select graph via `GraphSelect`.
+
+#### Step 2: dynamic form hydration
+
+`useForm` default values are async; it calls `getSchemaAndUpdateConfig(selectedGraph)` from `useAgentConfig`.
+
+#### Step 3: sectioned form model
+
+`AgentFieldsForm` renders sections conditionally by discovered config metadata:
+1. **Agent Details** (required name + description)
+2. **Agent Configuration** (UI fields mapped to `ConfigField`)
+3. **Agent Tools** (search + selectable tools, load-more pagination)
+4. **Agent RAG** (collection selector)
+5. **Supervisor Agents** (agent selector)
+
+#### Submission
+
+- Client validation: name/description required
+- API call: `useAgents().createAgent(deploymentId, graphId, payload)`
+- Success: toast, close dialog, non-blocking `refreshAgents()`
+- Failure: error toast
+
+### Edit Agent dialog workflow (`edit-agent-dialog.tsx`)
+
+- Opens from card action
+- Uses schema-driven `AgentFieldsForm` prefilled from existing agent config
+- Supports update and delete actions
+- Uses open-counter remount strategy to force clean schema/form state each open
+
+### Agent management state architecture
+
+- **Global inventory**: `AgentsProvider` (`apps/web/src/providers/Agents.tsx`)
+- **CRUD + backend operations**: `useAgents` (`apps/web/src/hooks/use-agents.tsx`)
+- **Schema extraction + config mapping**: `useAgentConfig` (`apps/web/src/hooks/use-agent-config.tsx`)
+- **Tool list in forms**: `MCPProvider` + `useSearchTools`
+
+### Agent management interaction patterns to replicate
+
+1. Two-lens navigation (grouped templates vs flat inventory)
+2. Schema-driven forms (not hardcoded per agent)
+3. Rich card metadata for quick comprehension
+4. Inline modal CRUD (preserve context, no full-page mode switches)
+5. Strong empty-state recovery paths (search reset / create CTA)
+
+## 3) Tools (`/tools`) — Deep design spec
+
+### Entry and structure
+
+Entry: `apps/web/src/app/(app)/tools/page.tsx` -> `features/tools/index.tsx`
+
+Page layout:
+1. Header row with icon/title/count badge
+2. Search input
+3. Separator
+4. Responsive tool grid (`ToolCard`)
+5. Optional **Load More Tools** footer button
+
+### Tool discovery workflow
+
+#### Tool population
+
+- Source: `MCPProvider` (`apps/web/src/providers/MCP.tsx`)
+- First load: provider auto-fetches via `getTools()` once
+- Pagination cursor maintained in MCP hook state
+
+#### Search/filter
+
+- `useSearchTools(tools)` exposes debounced term and filtered list
+- Search updates visible tools in real time
+
+#### Result states
+
+- Initial loading: six `ToolCardLoading` skeleton cards
+- Search-empty: "No tools found matching ..."
+- Inventory-empty: "No tools available for this agent."
+
+### Tool card interaction model (`components/tool-card/index.tsx`)
+
+Each card includes:
+- Title (`_.startCase(tool.name)`)
+- Truncated description
+- Primary actions:
+  - **Playground** link -> `/tools/playground?tool=<tool.name>`
+  - **View tool details** icon button opening `ToolDetailsDialog`
+
+### Tool playground workflow (`/tools/playground`)
+
+Entry: `app/(app)/tools/playground/page.tsx` -> `features/tools/playground/index.tsx`
+
+#### Layout model
+
+- Top row: page title + `ToolListCommand` selector
+- Tool metadata summary row
+- Horizontal `ResizablePanelGroup`:
+  - Left: input (`SchemaForm`)
+  - Right: output (`ResponseViewer`)
+
+#### Selection and URL sync
+
+- Query state key: `tool` (via `useQueryState`)
+- On load:
+  - Missing tool name -> redirect to `/tools`
+  - Unknown tool name -> toast + clear query + redirect
+- Switching tool resets input/response/error state
+
+#### Input model (`SchemaForm`)
+
+Schema-driven field generation from `inputSchema.properties`:
+- enum -> `Select`
+- string -> `Input`
+- number/integer with min/max -> `Slider` + numeric readout
+- number/integer without range -> numeric input
+- boolean -> `Switch`
+- fallback -> text input
+
+Required fields are visually marked and property descriptions are surfaced inline.
+
+#### Execution model
+
+- Run action calls `callTool({ name, args })`
+- Loading state disables button and shows spinner
+- Success renders response and clears form values
+- Error handling:
+  - generic error panel + toast
+  - MCP auth-required (`code -32003`): specialized info card with auth URL
+
+#### Response model (`ResponseViewer`)
+
+Three primary states:
+1. Pending execution spinner
+2. Error/auth-required view
+3. Result view with tabs:
+   - **Pretty** nested object renderer
+   - **Raw** JSON dump
+
+### Tool management interaction patterns to replicate
+
+1. Catalog first, execution second (discover -> inspect -> test)
+2. URL-addressable playground state (`?tool=` deep-link)
+3. Schema-native form generation and response rendering
+4. Clear handling of external authentication loops
+5. Cursor pagination compatible with very large tool inventories
+
+## 4) RAG (`/rag`)
+
+Entry: `apps/web/src/app/(app)/rag/page.tsx` -> `features/rag/index.tsx`
+
+Layout is a responsive 1:2 column split:
+- Left: collections (`CollectionsCard`)
+- Right: documents (`DocumentsCard`)
+
+Workflow:
+1. User selects/creates collection
+2. Document table updates to selected collection
+3. User uploads/deletes documents
+
+Patterns:
+- Dialog-based create/edit/delete actions
+- Skeleton loading cards during fetch
+- Empty-state component when no collections exist
+
+## 5) Inbox (`/inbox`)
+
+Entry: `apps/web/src/app/(app)/inbox/page.tsx`
+
+Distinctive layout:
+- Main app shell + additional right-side inbox sidebar (`InboxSidebar`)
+- Rooted in `ThreadsProvider`
+
+Workflow:
+1. List view of inbox items (`AgentInbox`/`InboxView`)
+2. Selection opens detailed `ThreadView`
+3. Users inspect thread/tool-call/interrupt details and take actions
+
+State is URL-driven (inbox type, offsets, selected thread, agent inbox id), supporting navigation persistence and shareable context.
+
+## 6) Settings (`/settings`)
+
+Entry: `apps/web/src/app/(app)/settings/page.tsx` -> `features/settings/index.tsx`
+
+Screen behavior:
+- API key fields (OpenAI, Anthropic, Google, Tavily)
+- `PasswordInput` components for masked entry
+- Client-local persistence via `useLocalStorage`
+
+No submit step: updates are immediate to local storage.
+
+## 7) Authentication routes (`/(auth)`)
+
+Entry points:
+- `/signin`
+- `/signup`
+- `/forgot-password`
+- `/reset-password`
+
+Shared characteristics:
+- Isolated auth layout
+- Supabase-backed provider methods from `providers/Auth.tsx`
+- Standard credentials + reset flows, with Google sign-in option when enabled
+
+## Cross-screen interaction patterns
+
+## Pattern A: URL is part of state contract
+
+`nuqs` query state is used across chat, playground, and inbox to represent selected entities and view state. This enables:
+- deep linking
+- back/forward correctness
+- reload persistence without custom router code
+
+## Pattern B: Schema-driven user interfaces
+
+Agent config and tool playground both generate inputs from machine-readable metadata. This yields a framework-agnostic contract:
+- backend metadata defines UI
+- frontend renders typed controls consistently
+
+## Pattern C: Progressive disclosure
+
+Complexity is moved into dialogs, sidebars, and tabs rather than forcing all controls onto one screen.
+
+## Pattern D: Operational feedback everywhere
+
+- skeletons for loading
+- explicit empty states
+- toast alerts for recoverable failures
+- visible disabled/loading button states during mutations
+
+## Replication guidance for enterprise implementation
+
+To replicate this UX in a different framework with minimal behavior drift:
+
+1. Keep a **global shell provider stack** for auth + agents + tools + rag.
+2. Preserve the **two-lens Agents IA** (Templates + All Agents).
+3. Preserve **tool discovery -> details -> playground** as separate but tightly linked steps.
+4. Treat agent config and tool execution forms as **schema-rendered**, not handcrafted.
+5. Keep **query-param synchronization** for selected agent/tool/thread context.
+6. Match feedback semantics (skeleton, empty, toast, inline error, loading button).
+7. Keep CRUD actions modal and context-preserving for faster operator workflows.

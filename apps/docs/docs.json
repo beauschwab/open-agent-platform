@@ -26,7 +26,8 @@
               "setup/agents",
               "setup/authentication",
               "setup/rag-server",
-              "setup/mcp-server"
+              "setup/mcp-server",
+              "setup/frontend-ux-spec"
             ]
           },
           {
